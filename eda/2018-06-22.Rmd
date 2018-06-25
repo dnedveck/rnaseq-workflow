@@ -1,0 +1,248 @@
+---
+title: "first run"
+output: 
+  html_document: 
+    toc: yes
+---
+
+```{r, message = FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+
+knitr::opts_chunk$set(cache = TRUE)
+options(stringsAsFactors = FALSE)
+```
+
+
+## importing data
+
+Using the ZIKA dataset that I am testing out IsoEM2 with, symlinked into this directory.
+
+I already ran kallisto on the data, in `kallisto-allrna`, so I can jump right in at the stage of `tximport`
+
+In order to import the data with the correct transcript and gene information, I can download it from biomart
+
+
+```{r}
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+transcript2gene <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"), mart = mart) %>% 
+  # sorting
+  arrange(ensembl_gene_id)
+```
+
+```{r}
+kallistodirs <- Sys.glob("../data/kallisto-allrna/SRR*")
+txi <- tximport(files=paste0(kallistodirs, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene,
+                countsFromAbundance = "scaledTPM", ignoreTxVersion = TRUE)
+```
+
+Let's grab the metadata too:
+```{r}
+# the Run col matches with what the folder names are
+metadata <- read.delim("../data/SraRunTable.txt") %>% filter(Instrument == "Illumina MiSeq")
+# making the appropriate factors
+metadata$infection_status  %<>% gsub(pattern = " ", replacement = "", x = .) %>%  as.factor()
+metadata$Run  %<>% as.factor
+```
+
+```{r}
+# setting up row and column names for later, also to just keep track of things in the txi object
+colnames(txi$counts) <- metadata$Run
+rownames(metadata) <- metadata$Run
+```
+
+
+## making DESeq2 object
+
+From this Bioconductor vignette: https://bioconductor.org/packages/release/bioc/vignettes/tximport/inst/doc/tximport.html#deseq2
+
+```{r}
+deseq <- DESeqDataSetFromTximport(txi, metadata, ~ infection_status)
+```
+
+filtering the object to remove rows that have 1 or less counts
+
+```{r}
+nrow(deseq)
+sum(rowSums(counts(deseq)) <=1)
+
+deseq <- deseq[rowSums(counts(deseq)) > 1, ]
+nrow(deseq)
+```
+
+
+
+## Exploratory analysis
+
+loading a package to look at mean sd plots
+
+```{r}
+library(vsn)
+```
+
+
+```{r}
+meanSdPlot(counts(deseq), ranks = FALSE)
+```
+
+the next step is to do some corrections, they recommend doing an rlog transformation for small datasets, so I'll stick with that.
+
+```{r}
+d.rlog <- rlog(deseq, blind = FALSE)
+```
+
+and now the mean-sd plot:
+```{r}
+meanSdPlot(assay(d.rlog), ranks = FALSE)
+```
+
+well, the goal is to have uniform variance at all means, and that doesn't look like the case.
+
+What about the other method?
+
+```{r}
+d.vst <- vst(deseq, blind = FALSE) 
+meanSdPlot(assay(d.vst), ranks = FALSE)
+```
+
+Also trash.
+
+Maybe this is because the kallisto input was already "scaled TPM"?
+
+Reading up on the tximport / countsFromAbundance argument:
+
+> character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+ok, let's try using the default of "no", and getting the plot
+
+```{r}
+txi.d <- tximport(files=paste0(kallistodirs, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene, ignoreTxVersion = TRUE)
+dd <- DESeqDataSetFromTximport(txi.d, metadata, ~ infection_status)
+
+nrow(dd)
+sum(rowSums(counts(dd)) <=1)
+
+dd <- dd[rowSums(counts(dd)) > 1, ]
+nrow(dd)
+```
+
+```{r}
+dd.rlog <- rlog(dd, blind = FALSE)
+dd.vst <- vst(dd, blind = FALSE) 
+```
+
+hmm, looks promising that there was no garbage about fitting an lm, and instead it's correcting for library size (the thing that the scaledTPM did already.)
+
+
+
+plots
+```{r}
+meanSdPlot(counts(dd), ranks = FALSE)
+meanSdPlot(assay(dd.rlog), ranks = FALSE)
+meanSdPlot(assay(dd.vst), ranks = FALSE)
+```
+
+Still huge sprays of data. Doesn't look like uniform sd at all. 
+
+But .... reading the workflow they mention using raw counts, so I guess I shouldn't be using scaled TPM as input, and instead be reading in the raw counts from kallisto (*I'll be using `dd` going forward*)
+
+
+reading that rlog is sensitive to high count outliers, I'll go with vst. 
+
+### looking at sample distances
+
+*using the vst transformed values*
+
+```{r}
+sampleDists <- dist(t(assay(dd.vst)))
+sampleDists
+```
+
+new packages coming in!
+```{r}
+library("pheatmap")
+library("RColorBrewer")
+```
+
+
+```{r}
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( dd.vst$infection_status, dd.vst$Run, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(4, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+Yep, so they cluster together. That's neat.
+
+### PCA
+
+looks like there's a PCA method built into DESeq2
+
+```{r}
+plotPCA(dd.vst, intgroup = "infection_status")
+```
+
+89% variance explained in PC1? That's nuts! I guess the world looks different when you're looking at gene expression as compared to genomic association signatures ... 
+
+## Differential Expression Analysis
+
+```{r}
+dds <- DESeq(dd)
+```
+
+```{r}
+dd.results <- results(dds)
+dd.results
+```
+
+```{r}
+mcols(dd.results, use.names = TRUE)
+```
+
+...strange, there's some NA p-values. Oh, also these are all the tested genes, not just significant ones.
+
+```{r}
+summary(dd.results)
+
+table(dd.results$padj < 0.05)
+```
+
+
+
+
+**interesting, it looks like DESeq allows for contrasts, so that within this dataset, I can look at two different runs in the Zika infected group:**
+
+In order to make certain contrasts, those variables need to be included within the DESeq object constructed from the txi object:
+
+```{r}
+dd.con <- DESeqDataSetFromTximport(txi.d, metadata, ~ infection_status + Run)
+```
+
+> Error in checkFullRank(modelMatrix) : 
+  the model matrix is not full rank, so the model cannot be fit as specified.
+  One or more variables or interaction terms in the design formula are linear
+  combinations of the others and must be removed.
+
+> Please read the vignette section 'Model matrix not full rank':
+
+>  vignette('DESeq2')
+
+```{r}
+ddres.con <- DESeq(dd.con)
+cell.results <- results(dds, contrast = c("Run", "SRR3191544", "SRR3191545"))
+```
+
+> There are additional ways to build results tables for certain comparisons after running DESeq once. If results for an interaction term are desired, the name argument of results should be used. Please see the help page for the results function for details on the additional ways to build results tables. In particular, the Examples section of the help page for results gives some pertinent examples.
