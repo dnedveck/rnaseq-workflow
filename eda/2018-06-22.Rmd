@@ -246,3 +246,57 @@ cell.results <- results(dds, contrast = c("Run", "SRR3191544", "SRR3191545"))
 ```
 
 > There are additional ways to build results tables for certain comparisons after running DESeq once. If results for an interaction term are desired, the name argument of results should be used. Please see the help page for the results function for details on the additional ways to build results tables. In particular, the Examples section of the help page for results gives some pertinent examples.
+
+-------------
+
+
+ok, trying to build a model where I can look at an interaction between two inds.
+
+mock data:
+```{r}
+newdata <- metadata %>% select(Run, infection_status)
+newdata$comparison <- c("ctrl", "ctrl", "zika1", "zika2") %>% factor()
+```
+
+
+```{r}
+dd.con <- DESeqDataSetFromTximport(txi.d, newdata, ~ infection_status + comparison)
+```
+
+... still get an error, I guess that wasn't a good workaround
+
+What about three groups? 
+
+```{r}
+dd.con <- DESeqDataSetFromTximport(txi.d, newdata, ~  comparison)
+```
+
+bingo
+
+But now to interpret the differences.
+
+```{r}
+dds.con <- DESeq(dd.con)
+contrast.results <- results(dds.con, contrast = c("comparison", "zika1", "zika2"))
+```
+
+```{r}
+summary(contrast.results)
+```
+
+And there's only one gene that was found to have a higher log fold change. I guess this makes sense in regard to this being a comparison between two memebers of the same group, but I was expecting something higher than 1.
+
+```{r}
+full.results <- results(dds.con)
+```
+
+```{r}
+summary(full.results)
+```
+
+```{r}
+full.results
+```
+
+hmm, so from this printed table, it seems that only zika2 and control were compared, not a comparison of all three groups. 
+

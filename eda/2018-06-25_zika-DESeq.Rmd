@@ -1,0 +1,146 @@
+---
+title: "Zika Illumina analysis"
+output: 
+  html_document: 
+    toc: yes
+---
+
+```{r, message = FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+
+knitr::opts_chunk$set(cache = TRUE)
+options(stringsAsFactors = FALSE)
+```
+
+Setting up a clean rmd of the DESeq2 analysis to have a better document to refer back to. 
+
+## Importing Data
+
+Using abundance data from kallisto, run on the paired-end Zika samples, symlinked from another directory
+
+I already ran kallisto on the data, in `kallisto-allrna`, so I can jump right in at the stage of `tximport`
+
+In order to import the data with the correct transcript and gene information, I can download it from biomart
+
+
+```{r}
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+transcript2gene <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "hgnc_symbol"), mart = mart) %>% 
+  # sorting
+  arrange(ensembl_gene_id)
+```
+
+```{r}
+kallistodirs <- Sys.glob("../data/kallisto-allrna/SRR*")
+txi <- tximport(files=paste0(kallistodirs, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene,
+                # countsFromAbundance = "scaledTPM", # not doing this as DESeq requires raw count values
+                ignoreTxVersion = TRUE)
+```
+
+Let's grab the metadata too:
+```{r}
+# the Run col matches with what the folder names are
+metadata <- read.delim("../data/SraRunTable.txt") %>% filter(Instrument == "Illumina MiSeq")
+# making the appropriate factors
+metadata$infection_status  %<>% gsub(pattern = " ", replacement = "", x = .) %>%  as.factor()
+metadata$Run  %<>% as.factor
+```
+
+```{r}
+# setting up row and column names for later, also to just keep track of things in the txi object
+colnames(txi$counts) <- metadata$Run
+rownames(metadata) <- metadata$Run
+```
+
+
+## Making the DESeq object
+
+
+Importing from the txi object made of the kallisto runs
+
+```{r}
+deseq <- DESeqDataSetFromTximport(txi, metadata, ~ infection_status)
+```
+
+filtering the object to only have those with counts greater than 1
+
+```{r}
+nrow(deseq)
+sum(rowSums(counts(deseq)) <=1)
+
+deseq <- deseq[rowSums(counts(deseq)) > 1, ]
+nrow(deseq)
+```
+
+## Differential Expression analysis
+
+Doing the differential expression analysis with DESeq
+
+```{r}
+dds <- DESeq(deseq)
+```
+
+Using an accessor function to get the results:
+
+```{r}
+dd.results <- results(dds)
+dd.results
+```
+
+```{r}
+mcols(dd.results, use.names = TRUE)
+```
+
+Let's get a summary of the results:
+
+```{r}
+summary(dd.results)
+```
+
+```{r}
+# getting the data into a format I can handle:
+dd.df <- dd.results %>% as.data.frame
+dd.df$ensembl_gene_id <- row.names(dd.df)
+
+dd.tibble <- dd.df %>% left_join(transcript2gene %>% dplyr::select(-ensembl_transcript_id) %>% distinct, .) %>%
+  as_tibble() %>%
+  filter(!is.na(padj)) %>%
+  mutate(neglogp = -log(padj))
+```
+
+```{r}
+dd.tibble %>% filter(neglogp > 100) %>% arrange(-neglogp)
+```
+
+```{r}
+dd.tibble %>% filter(abs(log2FoldChange) > 9) %>% arrange(-abs(log2FoldChange))
+```
+
+
+
+
+
+
+And why not have a volcano plot:
+
+
+
+```{r}
+# handmade
+
+
+dd.tibble %>% ggplot(aes(x = log2FoldChange, y = neglogp)) + 
+  geom_point(alpha = 1/5) + 
+  geom_hline(yintercept = -log(0.1)) +
+  labs(y = "-log(padj)")
+```
+
+
