@@ -1,0 +1,193 @@
+---
+title: "2v1 comparisons"
+author: "Derek"
+date: "July 12, 2018"
+output: 
+  html_document:
+    toc: yes
+---
+ 
+```{r, message = FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+
+knitr::opts_chunk$set(cache = TRUE)
+options(stringsAsFactors = FALSE)
+```
+
+I want to see if DESeq2 can do 2v1 comparisons ... the kind of comparisons I would be doing if I were to be comparing CO vs control gene expression over time. 
+
+Steps for this would be to read in the gene expression data, and then see how to run DESeq2 on it, with my desired model. 
+
+
+## Importing data
+
+```{r}
+# needed if on Spectrum Health network
+Sys.setenv("http_proxy" = "proxy.spectrum-health.org:9090")
+```
+
+
+
+```{r}
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+transcript2gene <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "hgnc_symbol"), mart = mart) %>% 
+  # sorting
+  arrange(ensembl_gene_id)
+```
+
+```{r}
+kallistodirs <- Sys.glob("../data/kallisto-allrna/SRR*")
+
+# loading in only the two controls, and one zika
+kallistodirs <- kallistodirs[-4]
+
+
+txi <- tximport(files=paste0(kallistodirs, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene,
+                # countsFromAbundance = "scaledTPM", # not doing this as DESeq requires raw count values
+                ignoreTxVersion = TRUE)
+```
+
+Let's grab the metadata too:
+```{r}
+# the Run col matches with what the folder names are
+metadata <- read.delim("../data/SraRunTable.txt") %>% filter(Instrument == "Illumina MiSeq")
+# making the appropriate factors
+metadata$infection_status  %<>% gsub(pattern = " ", replacement = "", x = .) %>%  as.factor()
+metadata$Run  %<>% as.factor
+
+# removing the last run's metatdata, I'm only reading in 3 samples
+metadata %<>% dplyr::slice(1:3)
+```
+
+```{r}
+# setting up row and column names for later, also to just keep track of things in the txi object
+colnames(txi$counts) <- metadata$Run
+rownames(metadata) <- metadata$Run
+```
+
+
+## Analyzing with DESeq2
+
+
+### Making DESeq object
+
+Importing from the txi object made of the kallisto runs
+
+```{r}
+deseq <- DESeqDataSetFromTximport(txi, metadata, ~ infection_status)
+```
+
+
+filtering the object to only have those with counts greater than 1
+
+```{r}
+nrow(deseq)
+sum(rowSums(counts(deseq)) <=1)
+
+deseq <- deseq[rowSums(counts(deseq)) > 1, ]
+nrow(deseq)
+```
+
+### fitting model
+
+```{r}
+dds <- DESeq(deseq)
+```
+
+so far there's no errors, that's nice!
+
+Using an accessor function to get the results:
+
+```{r}
+dd.results <- results(dds)
+dd.results
+```
+
+```{r}
+mcols(dd.results, use.names = TRUE)
+```
+
+Let's get a summary of the results:
+
+```{r}
+summary(dd.results)
+```
+
+
+sweet, this looks great, I can do the analysis that I was thinking with this method
+
+## Can I do a 1v1?
+
+```{r}
+kdirs1v1 <- kallistodirs[-2]
+md1v1 <- metadata[-2, ]
+```
+
+```{r}
+txi1v1 <- tximport(files=paste0(kdirs1v1, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene,
+                # countsFromAbundance = "scaledTPM", # not doing this as DESeq requires raw count values
+                ignoreTxVersion = TRUE)
+```
+
+```{r}
+# setting up row and column names for later, also to just keep track of things in the txi object
+colnames(txi1v1$counts) <- md1v1$Run
+rownames(md1v1) <- md1v1$Run
+```
+
+```{r}
+deseq <- DESeqDataSetFromTximport(txi1v1, md1v1, ~ infection_status)
+```
+
+
+filtering the object to only have those with counts greater than 1
+
+```{r}
+nrow(deseq)
+sum(rowSums(counts(deseq)) <=1)
+
+deseq <- deseq[rowSums(counts(deseq)) > 1, ]
+nrow(deseq)
+```
+
+### fitting model
+
+```{r}
+dds <- DESeq(deseq)
+```
+
+As expected, there was a warning thrown:
+
+> In checkForExperimentalReplicates(object, modelMatrix) :
+  same number of samples and coefficients to fit,
+  estimating dispersion by treating samples as replicates.
+  please read the ?DESeq section on 'Experiments without replicates'.
+  in summary: this analysis only potentially useful for data exploration,
+  accurate differential expression analysis requires replication
+
+Using an accessor function to get the results:
+
+```{r}
+dd.results <- results(dds)
+dd.results
+```
+
+```{r}
+mcols(dd.results, use.names = TRUE)
+```
+
+Let's get a summary of the results:
+
+```{r}
+summary(dd.results)
+```

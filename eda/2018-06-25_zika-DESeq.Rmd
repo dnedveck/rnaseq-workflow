@@ -27,6 +27,12 @@ I already ran kallisto on the data, in `kallisto-allrna`, so I can jump right in
 
 In order to import the data with the correct transcript and gene information, I can download it from biomart
 
+```{r}
+# needed if on Spectrum Health network
+Sys.setenv("http_proxy" = "proxy.spectrum-health.org:9090")
+```
+
+
 
 ```{r}
 mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")

@@ -1,0 +1,62 @@
+---
+title: "DEG analysis"
+author: "Derek"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+options(stringsAsFactors = FALSE)
+
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+```
+
+
+## Intro
+
+Taking the output of transcript quantifications from `kallisto`, quantifying at the gene level with tximport, and then getting differential expression with DESeq2.
+
+The goal of this document is to accomplish the step of reading in the transcript quantification from kallisto and producing differential expression estimates (fold change), and significance values on these estimates for the different groups
+
+## Importing Data
+
+
+
+```{r}
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+transcript2gene <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "hgnc_symbol"), mart = mart) %>% 
+  # sorting
+  arrange(ensembl_gene_id)
+```
+
+```{r}
+kallistodirs <- Sys.glob("../data/kallisto-allrna/SRR*")
+txi <- tximport(files=paste0(kallistodirs, "/abundance.h5"),
+                type = "kallisto",
+                tx2gene = transcript2gene,
+                # countsFromAbundance = "scaledTPM", # not doing this as DESeq requires raw count values
+                ignoreTxVersion = TRUE)
+```
+
+Let's grab the metadata too:
+```{r}
+# the Run col matches with what the folder names are
+metadata <- read.delim("../data/SraRunTable.txt") %>% filter(Instrument == "Illumina MiSeq")
+# making the appropriate factors
+metadata$infection_status  %<>% gsub(pattern = " ", replacement = "", x = .) %>%  as.factor()
+metadata$Run  %<>% as.factor
+```
+
+```{r}
+# setting up row and column names for later, also to just keep track of things in the txi object
+colnames(txi$counts) <- metadata$Run
+rownames(metadata) <- metadata$Run
+```
+
